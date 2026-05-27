@@ -1,0 +1,364 @@
+---
+title: "04_sample_by_sample_analysis"
+output: html_document
+date: "2025-04-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries
+
+```{r echo=FALSE}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(here)
+library(ggplot2)
+library(stringr)
+```
+
+## Analysis
+
+19/04/2025 - In this analysis, I am looking at the samples separately
+
+```{r}
+h5_dir <- here("/Users/tharveshmoideliyakatali/Documents/XX_Steffan_UiO_RNA_seq/mouse_single_cell/individual_files")
+h5_files <- list.files(h5_dir, pattern = "\\.h5$", full.names = TRUE)
+
+#Read metadata
+meta_path <- here("../aggregation.csv")
+metadata <- readr::read_csv(meta_path)
+metadata$molecule_h5 <- NULL
+```
+
+
+## Reading count files
+
+```{r}
+seurat_list <- list()
+
+for(file in h5_files)
+{
+  sample_name <- gsub(".h5$", "", basename(file))
+  sample_name <- gsub("^[^_]+_", "", sample_name)
+  counts <- Read10X_h5(file)
+  seurat_obj <- CreateSeuratObject(counts = counts, project = sample_name)
+  seurat_list[[sample_name]] <- seurat_obj
+}
+```
+## Add metadata to the metadata
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  # Get corresponding metadata for this sample
+  # Adjust this based on how your metadata is organized
+  sample_metadata <- metadata %>% filter(sample_name == sample_id)
+  
+  # Add sample-level metadata to Seurat object
+  for (col in colnames(sample_metadata)) {
+    if (col != "sample") {
+      seurat_list[[sample_name]][[col]] <- sample_metadata[[col]][1]
+    }
+  }
+}
+```
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  cat(sample_name, " ",ncol(seurat_list[[sample_name]]), "\n")
+}
+```
+
+# Cell/barcode counts at the beginning
+
+```{r}
+cb_counts_start <- data.frame(
+  sample = names(seurat_list),
+  n_cb = sapply(seurat_list, function(obj) ncol(obj))
+)
+cb_counts_start
+```
+
+
+```{r}
+min_features <- 200
+min_counts <- 500
+
+seurat_list_feature_count_filtered <- lapply(seurat_list, function(obj) {
+  obj <- subset(obj, subset = nFeature_RNA > min_features & nCount_RNA > min_counts)
+})
+```
+
+# Cell/barcode counts after minimum count filtering
+
+```{r}
+cb_counts_count_filtered <- data.frame(
+  sample = names(seurat_list_feature_count_filtered),
+  n_cb = sapply(seurat_list_feature_count_filtered, function(obj) ncol(obj))
+)
+cb_counts_count_filtered
+```
+
+# Join the number of cells table
+
+```{r}
+cell_count_number <- left_join(cb_counts_start, cb_counts_count_filtered, by = 'sample')
+colnames(cell_count_number) <- c("sample", "cb_wo_filter", "cb_filter_by_nfeatures_ncount")
+write.table(cell_count_number, file = "01_mito_content_analysis/cell_feature_umi_filtered.tsv", quote = FALSE,
+            sep = "\t", row.names = FALSE)
+```
+
+```{r}
+cell_count_number$cb_filter_by_nfeatures_ncount %>% mean()
+```
+
+# Calculate percent mt on the count filtered seurat object
+
+```{r}
+for (sample_name in names(seurat_list_feature_count_filtered)) {
+  seurat_list_feature_count_filtered[[sample_name]][["percent.mt"]] <- PercentageFeatureSet(seurat_list_feature_count_filtered[[sample_name]], pattern = "^mt-")
+}
+```
+
+# Since it is a Flex kit, I want to look at the number of mitochondiral genes in the feature list
+
+```{r}
+# Check how many features (genes) are mitochondrial
+mt_genes <- grep("^mt-", rownames(seurat_obj), value = TRUE)  # Or "^MT-" if uppercase
+
+length(mt_genes)  # Number of mitochondrial genes
+```
+
+> Does this look fine? There are 13 mitochondrial genes in the features/probes
+
+# Calculate average mt percent per sample
+
+```{r}
+avg_mt_df <- data.frame(
+  sample = names(seurat_list_feature_count_filtered),
+  avg_percent_mt = sapply(seurat_list_feature_count_filtered, function(obj) 
+  {
+    mean(obj$percent.mt)
+  })
+)
+```
+
+```{r}
+write.table(x = avg_mt_df, file = "01_mito_content_analysis/average_mit_exp.tsv", quote = F,
+            sep = "\t", row.names = F)
+```
+
+
+# Plot number of cells retained at each cutoff 
+
+```{r}
+# Vector of cutoff thresholds 
+plot_mt_retention <- function(seurat_list, obj_name)
+{
+  cutoffs <- seq(5, 40, by=5)
+  obj = seurat_list[[obj_name]]
+  # For each cutoff, count how many cells have percent.mt < cutoff
+  retained_cells <- sapply(cutoffs, function(x) sum(obj$percent.mt < x))
+
+  # Create a data frame for plotting
+  df <- data.frame(cutoff = cutoffs, n_cells_retained = retained_cells)
+  retained_20 <- df$n_cells_retained[df$cutoff == 20]
+  total_cells <- ncol(obj)
+# Plot
+  p <- ggplot(df, aes(x = cutoff, y = n_cells_retained)) +
+        geom_line(size = 1) +
+        geom_point() +
+        geom_vline(xintercept = 20, linetype = "dashed", color = "gray40") +
+        geom_text(aes(x = 20, y = retained_20, label = paste0("n = ", retained_20)),
+                vjust = -0.5, hjust = -0.1, color = "red", size = 5) +
+        labs(title = paste0("Cells Retained at Different Mitochondrial Cutoffs ", obj_name, " (total cells = ", total_cells ,")" ),
+           x = "Mitochondrial % Cutoff",
+          y = "Number of Cells Retained") +
+        theme_minimal()
+  print(p)
+}
+```
+
+```{r}
+for (sample_name in names(seurat_list_feature_count_filtered))
+{
+  plot_mt_retention(seurat_list_feature_count_filtered, sample_name)
+}
+```
+
+
+---
+Data-driven approach to set the cutoff. Here the original data is used (unfiltered in any form)
+
+Merge the seurat object
+
+```{r}
+merged_seurat <- merge(seurat_list[[1]],
+                       seurat_list[-1],
+                       add.cell.ids=names(seurat_list),
+                       project="merged_unfiltered")
+```
+
+Number of cells per sample:
+```{r}
+table(sapply(strsplit(colnames(merged_seurat), "_"), `[`, 1)) 
+```
+
+
+# Remove empty cell barcodes
+```{r}
+merged_seurat <- subset(merged_seurat, subset = nFeature_RNA > 0 & nCount_RNA > 0)
+```
+
+
+Number of cells per sample after removing empty barcodes:
+```{r}
+table(sapply(strsplit(colnames(merged_seurat), "_"), `[`, 1)) 
+```
+
+
+percent mt
+
+Calculate percent MT
+```{r}
+merged_seurat[["percent.mt"]] <- PercentageFeatureSet(merged_seurat, pattern = "^mt-")
+```
+
+
+Prelim quality: remove cells that are above 40% mito content
+```{r}
+merged_seurat <- subset(merged_seurat, subset = percent.mt < 40)
+```
+
+Number of cells per sample after removing > 40% mito content:
+```{r}
+table(sapply(strsplit(colnames(merged_seurat), "_"), `[`, 1)) 
+```
+
+```{r}
+VlnPlot(merged_seurat, features = "percent.mt", group.by = "sample_id", raster=F) +
+  geom_hline(yintercept = 20, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 25, linetype = "dashed", color = "blue", size = 1) +
+  theme_minimal() +
+  ggtitle("Mitochondrial % by Sample")
+
+```
+
+
+---
+
+```{r}
+merged_filtered_FC_seurat <- merge(seurat_list_feature_count_filtered[[1]],
+                                   seurat_list_feature_count_filtered[-1],
+                                   add.cell.ids=names(seurat_list_feature_count_filtered),
+                                   project="merged")
+```
+
+```{r}
+table(sapply(strsplit(colnames(merged_filtered_FC_seurat), "_"), `[`, 1)) 
+```
+
+```{r}
+VlnPlot(merged_filtered_FC_seurat, features = "percent.mt", group.by = "sample_id") +
+  geom_hline(yintercept = 20, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 25, linetype = "dashed", color = "blue", size = 1) +
+  theme_minimal() +
+  ggtitle("Mitochondrial % by Sample")
+
+```
+
+```{r}
+VlnPlot(merged_filtered_FC_seurat, features = "nFeature_RNA", group.by = "sample_id") +
+  geom_hline(yintercept = 1000, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 5000, linetype = "dashed", color = "blue", size = 1) +
+  theme_minimal() +
+  ggtitle("Feature counts by Sample")
+
+```
+
+```{r}
+VlnPlot(merged_filtered_FC_seurat, features = "nCount_RNA", group.by = "sample_id") +
+  geom_hline(yintercept = 1000, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 20000, linetype = "dashed", color = "blue", size = 1) +
+  theme_minimal() +
+  ggtitle("UMI counts by Sample")
+
+```
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  seurat_obj <- seurat_list[[sample_name]]
+  valid_cells <- !is.na(seurat_obj$percent.mt)
+  VlnPlot(seurat_obj[, valid_cells], features = "percent.mt", alpha = 0, pt.size = 0)
+}
+```
+
+```{r}
+VlnPlot(seurat_list[["Ctrl72h"]], features = "percent.mt", alpha = 0, pt.size = 0)
+```
+
+```{r}
+summary(seurat_list[["Ctrl72h"]]@meta.data$percent.mt)
+```
+
+```{r}
+sample_Ctrl72h <- seurat_list[["Ctrl72h"]]
+sample_Ctrl72h <- subset(sample_Ctrl72h, subset =  nFeature_RNA > 200)
+summary(sample_Ctrl72h@meta.data$percent.mt)
+summary(sample_Ctrl72h@meta.data$nCount_RNA)
+```
+
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  cat(sample_name, " ",ncol(seurat_list[[sample_name]]), "\n")
+}
+```
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  seurat_list[[sample_name]] <- subset(seurat_list[[sample_name]], subset = nFeature_RNA > 200 & percent.mt < 10)
+}
+```
+
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  cat(sample_name, " ",ncol(seurat_list[[sample_name]]), "\n")
+}
+```
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  plot1 <- FeatureScatter(seurat_list[[sample_name]], feature1 = "nCount_RNA", feature2 = "percent.mt") + NoLegend()
+  plot2 <- FeatureScatter(seurat_list[[sample_name]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + NoLegend()
+  print(plot1 + plot2 )
+}
+```
+
+
+```{r}
+# Convert to data frame for ggplot
+rna_counts <- data.frame(nCount_RNA = seurat_list$`Ctrl72h`$nCount_RNA)
+
+# Histogram
+ggplot(rna_counts, aes(x = nCount_RNA)) +
+  geom_histogram(bins = 100, fill = "steelblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Distribution of RNA counts per cell",
+       x = "RNA counts",
+       y = "Number of cells")
+
+# Density plot
+ggplot(rna_counts, aes(x = nCount_RNA)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "Distribution of RNA counts per cell - Ctrl72h",
+       x = "RNA counts",
+       y = "Density")
+```
+
+
+

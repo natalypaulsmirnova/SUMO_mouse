@@ -1,0 +1,230 @@
+---
+title: "03_SC_XAL_processing"
+output: html_document
+date: "2025-05-29"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load the libraries
+```{r echo=FALSE}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(RColorBrewer)
+library(pdist)
+library(plyr)
+library(reshape)
+library(ggplot2)
+library(reshape2)
+library(openxlsx)
+library(gplots)
+library(corrplot)
+library(viridis)
+library(reshape2)
+library(gridExtra)
+library(cowplot)
+library(reticulate)
+library(umap)
+library(monocle3)
+library(SeuratWrappers)
+library(patchwork)
+library(viridis)
+library(tidyverse)
+library(smplot2)
+library(dittoSeq) 
+```
+
+```{r}
+mouse_seurat_filtered_XAL <- readRDS('04_XAL/04_XAL_sc_mouse_filtered_merged_seurat.rds')
+```
+
+```{r}
+VlnPlot(mouse_seurat_filtered_XAL, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+```{r}
+plot1 <- FeatureScatter(mouse_seurat_filtered_XAL, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(mouse_seurat_filtered_XAL, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r}
+# 1. Store current identity in a new metadata column
+mouse_seurat_filtered_XAL$original_ident <- Idents(mouse_seurat_filtered_XAL)
+
+# Unified identity
+Idents(mouse_seurat_filtered_XAL) <- "XAL"
+```
+
+# Normalize and find the variable features
+
+```{r}
+mouse_seurat_filtered_XAL <- NormalizeData(mouse_seurat_filtered_XAL, normalization.method = "LogNormalize", scale.factor = 10000)
+
+mouse_seurat_filtered_XAL <- FindVariableFeatures(mouse_seurat_filtered_XAL, selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(mouse_seurat_filtered_XAL), 10)
+```
+
+
+```{r}
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(mouse_seurat_filtered_XAL)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+```{r}
+all.genes <- rownames(mouse_seurat_filtered_XAL)
+mouse_seurat_filtered_XAL <- ScaleData(mouse_seurat_filtered_XAL, features = all.genes)
+```
+
+```{r}
+mouse_seurat_filtered_XAL <- RunPCA(mouse_seurat_filtered_XAL, features = VariableFeatures(object = mouse_seurat_filtered_XAL))
+```
+
+```{r}
+VizDimLoadings(mouse_seurat_filtered_XAL, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimHeatmap(mouse_seurat_filtered_XAL, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r}
+ElbowPlot(mouse_seurat_filtered_XAL, ndims = 30)
+```
+
+```{r}
+mouse_seurat_filtered_XAL <- FindNeighbors(mouse_seurat_filtered_XAL, dims = 1:20)
+mouse_seurat_filtered_XAL <- FindClusters(mouse_seurat_filtered_XAL)
+```
+
+```{r}
+mouse_seurat_filtered_XAL <- RunUMAP(mouse_seurat_filtered_XAL, dims = 1:20)
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_XAL, reduction = "pca")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_XAL, reduction = "umap", group.by = "original_ident")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_XAL, reduction = "umap", group.by = "group")
+```
+
+```{r}
+mouse_seurat_filtered_XAL[["joined"]] <- JoinLayers(mouse_seurat_filtered_XAL[["RNA"]])
+```
+
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+
+```{r}
+mouse_seurat_filtered_XAL <- CellCycleScoring(mouse_seurat_filtered_XAL, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE, assay="joined")
+```
+
+
+```{r}
+DimPlot(mouse_seurat_filtered_XAL, reduction = "umap", group.by = "Phase")
+```
+
+Write metadata after calculating the cell cycle score
+```{r}
+write.table(mouse_seurat_filtered_XAL@meta.data, file = "04_XAL/cell_cycle_scored_metadata.tsv",
+            sep = "\t", quote = F)
+```
+
+
+Remove joined layer
+```{r}
+mouse_seurat_filtered_XAL[["joined"]] <- NULL
+```
+
+
+Regressing the cell cycle score
+```{r}
+mouse_seurat_filtered_XAL <- ScaleData(mouse_seurat_filtered_XAL, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(mouse_seurat_filtered_XAL))
+```
+
+```{r}
+saveRDS(mouse_seurat_filtered_XAL, 
+        file = "04_XAL//04_XAL_sc_mouse_filtered_merged_seurat_cc.rds")
+```
+
+
+```{r}
+mouse_seurat_filtered_XAL <- RunPCA(mouse_seurat_filtered_XAL, 
+                                    features = VariableFeatures(mouse_seurat_filtered_XAL), 
+                                    nfeatures.print = 10)
+```
+
+
+```{r}
+mouse_seurat_filtered_XAL <- FindNeighbors(mouse_seurat_filtered_XAL, dims = 1:20)
+mouse_seurat_filtered_XAL <- FindClusters(mouse_seurat_filtered_XAL, resolution = 0.5)
+mouse_seurat_filtered_XAL <- RunUMAP(object = mouse_seurat_filtered_XAL, dims = 1:20)
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_XAL, group.by="seurat_clusters")
+```
+
+
+```{r}
+DimPlot(mouse_seurat_filtered_XAL, group.by="Phase")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_XAL, group.by="group")
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_XAL, 
+             group.by = "seurat_clusters",
+             var  = "Phase", scale="percent")
+```
+
+
+```{r}
+saveRDS(mouse_seurat_filtered_XAL, 
+        file = "04_XAL//04_XAL_sc_mouse_filtered_merged_seurat_cc.rds")
+```
+
+
+
+
+```{r}
+cd_genes2 <- c("Zfp42","Dppa5a","Klf2","Sox2","Apoe","Fabp3","Cd63","Utf1","Pim2","Dnmt3b","Pou3f1","Otx2","Lefty1","Nodal","mt-Cytb","mt-Nd5","Epcam","Cdh1","Cdh2","T","Fgf5","Fgf8","Wnt3","Nkx1-2","Cdx2","Eomes","Mixl1","Gsc","Lhx1","Mesp1","Foxa2","Chrd","Cobl","Bicc1","Tbx6","Tcf15","Notch1","Dll1","Aldh1a2","Meox1","Foxc1","Prrx2","Osr1","Meis2","Hand1","Gata6","Lmo2","Kdr","Cdh5","Etv2","Sox17","Spink1","Amot","Cldn6","Ncam1","Sox1","Sox3","Sox11","Pax3","Crabp1","Tubb3")
+cd_genes2 <- rev(cd_genes2)
+DotPlot(mouse_seurat_filtered_XAL, 
+                    features = cd_genes2, group.by = "RNA_snn_res.0.5", 
+                    cols = "Blues", scale.by = "size", 
+                    scale = TRUE) + coord_flip() + scale_color_distiller(direction = 0)
+```
+
+```{r}
+time_order <- c("48h", "72h", "96h", "120h")
+mouse_seurat_filtered_XAL$time <- factor(mouse_seurat_filtered_XAL$time, levels = time_order)
+DotPlot(mouse_seurat_filtered_XAL, 
+                    features = cd_genes2, group.by = "time", 
+                    cols = "Blues", scale.by = "size", 
+                    scale = TRUE) + coord_flip() + scale_color_distiller(direction = 0)
+```
+
+
+

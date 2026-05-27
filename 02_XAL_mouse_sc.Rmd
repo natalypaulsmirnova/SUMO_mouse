@@ -1,0 +1,206 @@
+---
+title: "02_XAL_mouse_sc"
+output: html_document
+date: "2025-05-29"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries
+
+```{r echo=FALSE}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(here)
+library(ggplot2)
+library(stringr)
+```
+
+## Analysis
+
+### Keep only XAL
+
+```{r}
+h5_dir <- here("/Users/tharveshmoideliyakatali/Documents/XX_Steffan_UiO_RNA_seq/mouse_single_cell/individual_files")
+h5_files <- list.files(h5_dir, pattern = "\\.h5$", full.names = TRUE)
+h5_files <- h5_files[grep("XAL", h5_files)]
+
+#Read metadata
+meta_path <- here("../aggregation.csv")
+metadata <- readr::read_csv(meta_path)
+metadata <- metadata %>% filter(group=="XAL")
+metadata$molecule_h5 <- NULL
+```
+
+## Reading count files
+
+```{r}
+seurat_list <- list()
+
+for(file in h5_files)
+{
+  sample_name <- gsub(".h5$", "", basename(file))
+  sample_name <- gsub("^[^_]+_", "", sample_name)
+  counts <- Read10X_h5(file)
+  seurat_obj <- CreateSeuratObject(counts = counts, project = sample_name)
+  seurat_list[[sample_name]] <- seurat_obj
+}
+```
+## Add metadata to the metadata
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  # Get corresponding metadata for this sample
+  # Adjust this based on how your metadata is organized
+  sample_metadata <- metadata %>% filter(sample_name == sample_id)
+  
+  # Add sample-level metadata to Seurat object
+  for (col in colnames(sample_metadata)) {
+    if (col != "sample") {
+      seurat_list[[sample_name]][[col]] <- sample_metadata[[col]][1]
+    }
+  }
+}
+```
+
+```{r}
+for (sample_name in names(seurat_list)) {
+  cat(sample_name, " ",ncol(seurat_list[[sample_name]]), "\n")
+}
+```
+
+# Cell/barcode counts at the beginning
+
+```{r}
+cb_counts_start <- data.frame(
+  sample = names(seurat_list),
+  n_cb = sapply(seurat_list, function(obj) ncol(obj))
+)
+cb_counts_start
+```
+
+# Filter based on Jesse's cutoff
+
+```{r}
+min_features <- 200
+max_features <- 7500
+min_counts <- 400
+max_counts <- 40000
+
+seurat_list_feature_count_filtered <- lapply(seurat_list, function(obj) {
+  obj <- subset(obj, subset = nFeature_RNA > min_features & 
+                  nFeature_RNA <= max_features & 
+                  nCount_RNA > min_counts &
+                  nCount_RNA <= max_counts)
+})
+```
+
+# Free up memory!
+```{r}
+rm(seurat_list)
+gc()
+```
+
+# Cell/barcode counts after applying above cutoff
+
+```{r}
+cb_counts_filtered <- data.frame(
+  sample = names(seurat_list_feature_count_filtered),
+  n_cb = sapply(seurat_list_feature_count_filtered, function(obj) ncol(obj))
+)
+cb_counts_filtered
+```
+
+```{r}
+cell_count_number <- left_join(cb_counts_start, cb_counts_filtered, by = 'sample')
+colnames(cell_count_number) <- c("sample", "cb_wo_filter", "cb_filter_by_nfeatures_ncount")
+write.table(cell_count_number, file = "04_XAL/cell_feature_umi_filtered.tsv", quote = FALSE,
+            sep = "\t", row.names = FALSE)
+```
+
+# Calculate percent mt on the count filtered seurat object
+
+```{r}
+for (sample_name in names(seurat_list_feature_count_filtered)) {
+  seurat_list_feature_count_filtered[[sample_name]][["percent.mt"]] <- PercentageFeatureSet(seurat_list_feature_count_filtered[[sample_name]], pattern = "^mt-")
+}
+```
+
+# Calculate average mt percent per sample
+
+```{r}
+avg_mt_df <- data.frame(
+  sample = names(seurat_list_feature_count_filtered),
+  avg_percent_mt = sapply(seurat_list_feature_count_filtered, function(obj) 
+  {
+    mean(obj$percent.mt)
+  })
+)
+```
+
+```{r}
+write.table(x = avg_mt_df, file = "04_XAL/average_mit_exp.tsv", quote = F,
+            sep = "\t", row.names = F)
+```
+
+# Merge the seurat object
+
+```{r}
+merged_seurat_filtered_XAL <- merge(seurat_list_feature_count_filtered[[1]],
+                                seurat_list_feature_count_filtered[-1],
+                                add.cell.ids=names(seurat_list_feature_count_filtered),
+                                project="gastruloid_merged_filtered")
+```
+
+# Plot mitochondrial gene percent
+
+```{r}
+VlnPlot(merged_seurat_filtered_XAL, features = "percent.mt", group.by = "sample_id", raster=F) +
+  geom_hline(yintercept = 20, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 25, linetype = "dashed", color = "blue", size = 1) +
+  theme_minimal() +
+  ggtitle("Mitochondrial % by Sample")
+
+```
+
+
+
+
+
+```{r}
+VlnPlot(merged_seurat_filtered_XAL, features = "nFeature_RNA", group.by = "sample_id") +
+  geom_hline(yintercept = 151, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 7499, linetype = "dashed", color = "blue", size = 1) +
+  theme_minimal() +
+  ggtitle("Feature counts by Sample")
+
+```
+
+```{r}
+VlnPlot(merged_seurat_filtered_XAL, features = "nCount_RNA", group.by = "sample_id") +
+  geom_hline(yintercept = 400, linetype = "dashed", color = "red", size = 1) +
+  geom_hline(yintercept = 40000, linetype = "dashed", color = "blue", size = 1) +
+  theme_minimal() +
+  ggtitle("UMI counts by Sample")
+
+```
+
+Remove cells with mt percent > 25%
+
+```{r}
+merged_seurat_filtered_XAL <- subset(merged_seurat_filtered_XAL, subset = percent.mt < 25)
+```
+
+Number of cells per sample after removing the high mito content:
+```{r}
+table(sapply(strsplit(colnames(merged_seurat_filtered_XAL), "_"), `[`, 1)) 
+```
+
+Write it to RDS
+```{r}
+saveRDS(merged_seurat_filtered_XAL, file = "04_XAL/04_XAL_sc_mouse_filtered_merged_seurat.rds")
+```

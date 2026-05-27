@@ -1,0 +1,358 @@
+---
+title: "03_SC_processing_Jesse"
+output: html_document
+date: "2025-05-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load the libraries
+```{r}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(RColorBrewer)
+library(pdist)
+library(plyr)
+library(reshape)
+library(ggplot2)
+library(reshape2)
+library(openxlsx)
+library(gplots)
+library(corrplot)
+library(viridis)
+library(reshape2)
+library(gridExtra)
+library(cowplot)
+library(reticulate)
+library(umap)
+library(monocle3)
+library(SeuratWrappers)
+library(patchwork)
+library(viridis)
+library(tidyverse)
+library(smplot2)
+#library(dittoSeq) 
+
+```
+
+
+```{r}
+mouse_seurat_filtered <- readRDS('02_QC_mouse_single_cell/02_sc_mouse_filtered_merged_seurat.rds')
+```
+
+
+```{r}
+VlnPlot(mouse_seurat_filtered, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+```{r}
+plot1 <- FeatureScatter(mouse_seurat_filtered, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(mouse_seurat_filtered, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+# Combine all the identity
+
+```{r}
+# 1. Store current identity in a new metadata column
+mouse_seurat_filtered$original_ident <- Idents(mouse_seurat_filtered)
+
+# Unified identity
+Idents(mouse_seurat_filtered) <- "gastruloid"
+```
+
+
+# Normalize and find the variable features
+
+```{r}
+mouse_seurat_filtered <- NormalizeData(mouse_seurat_filtered, normalization.method = "LogNormalize", scale.factor = 10000)
+
+mouse_seurat_filtered <- FindVariableFeatures(mouse_seurat_filtered, selection.method = "vst", nfeatures = 2000)
+```
+save intermediate:
+```{r}
+saveRDS(mouse_seurat_filtered, file = "03_SC_preprocessing/03_sc_processing_j_normalised_intermediate.rds")
+```
+
+Read intermediate:
+```{r}
+mouse_seurat_filtered <- readRDS(file = "03_SC_preprocessing/03_sc_processing_j_normalised_intermediate.rds")
+```
+
+
+
+```{r}
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(mouse_seurat_filtered), 10)
+```
+
+
+```{r}
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(mouse_seurat_filtered)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+```{r}
+all.genes <- rownames(mouse_seurat_filtered)
+mouse_seurat_filtered <- ScaleData(mouse_seurat_filtered, features = all.genes)
+```
+
+```{r}
+mouse_seurat_filtered <- RunPCA(mouse_seurat_filtered, features = VariableFeatures(object = mouse_seurat_filtered))
+```
+
+```{r}
+VizDimLoadings(mouse_seurat_filtered, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimHeatmap(mouse_seurat_filtered, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r}
+ElbowPlot(mouse_seurat_filtered, ndims = 30)
+```
+
+```{r}
+mouse_seurat_filtered <- FindNeighbors(mouse_seurat_filtered, dims = 1:15)
+mouse_seurat_filtered <- FindClusters(mouse_seurat_filtered)
+```
+
+```{r}
+mouse_seurat_filtered <- RunUMAP(mouse_seurat_filtered, dims = 1:15)
+```
+```{r}
+DimPlot(mouse_seurat_filtered, reduction = "pca")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered, reduction = "umap", group.by = "original_ident")
+```
+
+
+```{r}
+DimPlot(mouse_seurat_filtered, reduction = "umap", group.by = "time")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered, reduction = "umap", group.by = "group")
+```
+
+```{r}
+saveRDS(mouse_seurat_filtered, "03_SC_preprocessing/mouse_seurat_filtered_default_preprocessing.rds")
+```
+
+```{r}
+mouse_seurat_filtered[["joined"]] <- JoinLayers(mouse_seurat_filtered[["RNA"]])
+```
+
+
+
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+
+```{r}
+mouse_seurat_filtered <- CellCycleScoring(mouse_seurat_filtered, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE, assay="joined")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered, reduction = "umap", group.by = "Phase")
+```
+
+
+Write metadata after calculating the cell cycle score
+```{r}
+write.table(mouse_seurat_filtered@meta.data, file = "03_SC_preprocessing/cell_cycle_scored_metadata.tsv",
+            sep = "\t", quote = F)
+```
+
+Write the rdata
+```{r}
+saveRDS(mouse_seurat_filtered, file = "03_SC_preprocessing/mouse_seurat_filtered_default_preprocessing_cc.rds")
+```
+
+Remove joined layer
+```{r}
+mouse_seurat_filtered[["joined"]] <- NULL
+```
+
+
+Regressing the cell cycle score
+```{r}
+mouse_seurat_filtered <- ScaleData(mouse_seurat_filtered, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(mouse_seurat_filtered))
+```
+
+The step didn't work because of the memory issue. Trying to it per sample
+
+```{r}
+mouse_seurat_filtered_split <- SplitObject(mouse_seurat_filtered, split.by = "sample_id")
+```
+
+```{r}
+mouse_seurat_filtered_split <- lapply(mouse_seurat_filtered_split, function(obj) {
+  obj <- ScaleData(obj, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(obj))
+  return(obj)
+})
+```
+
+```{r}
+mouse_seurat_filtered_cc <- merge(mouse_seurat_filtered_split[[1]], y = mouse_seurat_filtered_split[-1])
+```
+
+Removing the split seurat object
+
+```{r}
+rm(mouse_seurat_filtered_split)
+gc()
+```
+
+Save the cell cycle regressed seurat object
+
+```{r}
+saveRDS(mouse_seurat_filtered_cc, 
+        file = "03_SC_preprocessing/mouse_seurat_filtered_default_preprocessing_cc_regressed.rds")
+```
+
+```{r}
+mouse_seurat_filtered_cc <- RunPCA(mouse_seurat_filtered_cc, features = VariableFeatures(mouse_seurat_filtered_cc), nfeatures.print = 10)
+```
+
+
+```{r}
+DimPlot(mouse_seurat_filtered_cc, group.by="Phase")
+```
+
+THE ABOVE RESULT IS NOT DESIRED!!
+
+Ran regression on a secured AWS network and copied to local
+
+Remove what is currently loaded
+```{r}
+rm(mouse_seurat_filtered_cc)
+gc()
+```
+
+Load what was processed on AWS
+
+```{r}
+mouse_seurat_filtered_cc_reg <- readRDS("03_SC_preprocessing/mouse_seurat_filtered_default_preprocessing_cc_regressed.rds")
+```
+
+
+```{r}
+mouse_seurat_filtered_cc_reg <- RunPCA(mouse_seurat_filtered_cc_reg, features = VariableFeatures(mouse_seurat_filtered_cc_reg), nfeatures.print = 10)
+```
+
+FAILED BECAUSE OF MEMORY - Continuing on AWS.
+
+Check phase info here to compare the plots
+
+```{r}
+mouse_seurat_filtered_cc <- readRDS("03_SC_preprocessing/mouse_seurat_filtered_default_preprocessing_cc_regressed_umap.rds")
+```
+
+```{r}
+FeaturePlot(mouse_seurat_filtered_cc, features = "S.Score", reduction = "umap")
+```
+
+```{r}
+FeaturePlot(mouse_seurat_filtered_cc, features = "G2M.Score", reduction = "umap")
+```
+
+```{r}
+FeaturePlot(mouse_seurat_filtered_cc, features = "Utf1", reduction = "umap")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_cc, group.by = "Phase")
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_cc, group.by = "seurat_clusters",var  = "Phase", scale="percent")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_cc, group.by = "time")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_cc, group.by = "RNA_snn_res.0.5", label = T)
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_cc, group.by = "original_ident")
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_cc, group.by = "seurat_clusters",var  = "original_ident", scale="percent")
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_cc, group.by = "seurat_clusters",var  = "time", scale="percent")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_cc, group.by = "RNA_snn_res.0.8", label = T)
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_cc, group.by = "RNA_snn_res.0.8",var  = "original_ident", scale="percent")
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_cc, group.by = "RNA_snn_res.0.8",var  = "time", scale="percent")
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_cc, group.by = "RNA_snn_res.0.8",var  = "group", scale="percent")
+```
+
+```{r}
+cd_genes2 <- c("Zfp42","Dppa5a","Klf2","Sox2","Apoe","Fabp3","Cd63","Utf1","Pim2","Dnmt3b","Pou3f1","Otx2","Lefty1","Nodal","mt-Cytb","mt-Nd5","Epcam","Cdh1","Cdh2","T","Fgf5","Fgf8","Wnt3","Nkx1-2","Cdx2","Eomes","Mixl1","Gsc","Lhx1","Mesp1","Foxa2","Chrd","Cobl","Bicc1","Tbx6","Tcf15","Notch1","Dll1","Aldh1a2","Meox1","Foxc1","Prrx2","Osr1","Meis2","Hand1","Gata6","Lmo2","Kdr","Cdh5","Etv2","Sox17","Spink1","Amot","Cldn6","Ncam1","Sox1","Sox3","Sox11","Pax3","Crabp1","Tubb3")
+cd_genes2 <- rev(cd_genes2)
+DotPlot(mouse_seurat_filtered_cc, 
+                    features = cd_genes2, group.by = "RNA_snn_res.0.5", 
+                    cols = "Blues", scale.by = "size", 
+                    scale = TRUE) + coord_flip() + scale_color_distiller(direction = 0)
+```
+
+```{r}
+original_ident_order <- c("Ctrl48h", "RACL48h", "NACL48h", "XAL48h", 
+                          "Ctrl72h", "RACL72h", "NACL72h", "XAL72h",
+                          "NACL96h", "XAL96h", "NACL120h", "XAL120h")
+mouse_seurat_filtered_cc$original_ident <- factor(mouse_seurat_filtered_cc$original_ident,
+                                                  levels = original_ident_order)
+DotPlot(mouse_seurat_filtered_cc, 
+                    features = cd_genes2, group.by = "original_ident", 
+                    cols = "Blues", scale.by = "size", 
+                    scale = TRUE) + coord_flip() + scale_color_distiller(direction = 0)
+```
+
+```{r}
+time_order <- c("48h", "72h", "96h", "120h")
+mouse_seurat_filtered_cc$time <- factor(mouse_seurat_filtered_cc$time, levels = time_order)
+DotPlot(mouse_seurat_filtered_cc, 
+                    features = cd_genes2, group.by = "time", 
+                    cols = "Blues", scale.by = "size", 
+                    scale = TRUE) + coord_flip() + scale_color_distiller(direction = 0)
+```
+
+```{r}
+FeaturePlot(mouse_seurat_filtered_cc, 
+                 features = c("Zfp42","Dppa5a","Klf2","Sox2"), 
+                 order = TRUE, cols = c("grey92", "dodgerblue4"), pt.size = 0.5)
+```
+
+
+
+
+

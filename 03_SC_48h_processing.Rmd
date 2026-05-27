@@ -1,0 +1,207 @@
+---
+title: "03_SC_48h_processing"
+output: html_document
+date: "2025-05-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load the libraries
+```{r echo=FALSE}
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(RColorBrewer)
+library(pdist)
+library(plyr)
+library(reshape)
+library(ggplot2)
+library(reshape2)
+library(openxlsx)
+library(gplots)
+library(corrplot)
+library(viridis)
+library(reshape2)
+library(gridExtra)
+library(cowplot)
+library(reticulate)
+library(umap)
+library(monocle3)
+library(SeuratWrappers)
+library(patchwork)
+library(viridis)
+library(tidyverse)
+library(smplot2)
+library(dittoSeq) 
+```
+
+```{r}
+mouse_seurat_filtered_48h <- readRDS('04_48h/04_48h_sc_mouse_filtered_merged_seurat.rds')
+```
+
+```{r}
+VlnPlot(mouse_seurat_filtered_48h, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+```{r}
+plot1 <- FeatureScatter(mouse_seurat_filtered_48h, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(mouse_seurat_filtered_48h, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r}
+# 1. Store current identity in a new metadata column
+mouse_seurat_filtered_48h$original_ident <- Idents(mouse_seurat_filtered_48h)
+
+# Unified identity
+Idents(mouse_seurat_filtered_48h) <- "time_48h"
+```
+
+# Normalize and find the variable features
+
+```{r}
+mouse_seurat_filtered_48h <- NormalizeData(mouse_seurat_filtered_48h, normalization.method = "LogNormalize", scale.factor = 10000)
+
+mouse_seurat_filtered_48h <- FindVariableFeatures(mouse_seurat_filtered_48h, selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(mouse_seurat_filtered_48h), 10)
+```
+
+
+```{r}
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(mouse_seurat_filtered_48h)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+```{r}
+all.genes <- rownames(mouse_seurat_filtered_48h)
+mouse_seurat_filtered_48h <- ScaleData(mouse_seurat_filtered_48h, features = all.genes)
+```
+
+```{r}
+mouse_seurat_filtered_48h <- RunPCA(mouse_seurat_filtered_48h, features = VariableFeatures(object = mouse_seurat_filtered_48h))
+```
+
+```{r}
+VizDimLoadings(mouse_seurat_filtered_48h, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimHeatmap(mouse_seurat_filtered_48h, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+
+```{r}
+ElbowPlot(mouse_seurat_filtered_48h, ndims = 30)
+```
+
+```{r}
+mouse_seurat_filtered_48h <- FindNeighbors(mouse_seurat_filtered_48h, dims = 1:15)
+mouse_seurat_filtered_48h <- FindClusters(mouse_seurat_filtered_48h)
+```
+
+```{r}
+mouse_seurat_filtered_48h <- RunUMAP(mouse_seurat_filtered_48h, dims = 1:15)
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_48h, reduction = "pca")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_48h, reduction = "umap", group.by = "original_ident")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_48h, reduction = "umap", group.by = "group")
+```
+
+```{r}
+mouse_seurat_filtered_48h[["joined"]] <- JoinLayers(mouse_seurat_filtered_48h[["RNA"]])
+```
+
+```{r}
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+
+```{r}
+mouse_seurat_filtered_48h <- CellCycleScoring(mouse_seurat_filtered_48h, s.features = s.genes, g2m.features = g2m.genes, set.ident = TRUE, assay="joined")
+```
+
+
+```{r}
+DimPlot(mouse_seurat_filtered_48h, reduction = "umap", group.by = "Phase")
+```
+
+Write metadata after calculating the cell cycle score
+```{r}
+write.table(mouse_seurat_filtered_48h@meta.data, file = "04_48h/cell_cycle_scored_metadata.tsv",
+            sep = "\t", quote = F)
+```
+
+
+Remove joined layer
+```{r}
+mouse_seurat_filtered_48h[["joined"]] <- NULL
+```
+
+
+Regressing the cell cycle score
+```{r}
+mouse_seurat_filtered_48h <- ScaleData(mouse_seurat_filtered_48h, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(mouse_seurat_filtered_48h))
+```
+
+```{r}
+saveRDS(mouse_seurat_filtered_48h, 
+        file = "04_48h//04_48h_sc_mouse_filtered_merged_seurat_cc.rds")
+```
+
+
+```{r}
+mouse_seurat_filtered_48h <- RunPCA(mouse_seurat_filtered_48h, 
+                                    features = VariableFeatures(mouse_seurat_filtered_48h), 
+                                    nfeatures.print = 10)
+```
+
+
+```{r}
+mouse_seurat_filtered_48h <- FindNeighbors(mouse_seurat_filtered_48h, dims = 1:15)
+mouse_seurat_filtered_48h <- FindClusters(mouse_seurat_filtered_48h, resolution = 0.5)
+mouse_seurat_filtered_48h <- RunUMAP(object = mouse_seurat_filtered_48h, dims = 1:15)
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_48h, group.by="seurat_clusters")
+```
+
+
+```{r}
+DimPlot(mouse_seurat_filtered_48h, group.by="Phase")
+```
+
+```{r}
+DimPlot(mouse_seurat_filtered_48h, group.by="group")
+```
+
+```{r}
+dittoBarPlot(object = mouse_seurat_filtered_48h, 
+             group.by = "seurat_clusters",
+             var  = "Phase", scale="percent")
+```
+
+
+```{r}
+saveRDS(mouse_seurat_filtered_48h, 
+        file = "04_48h//04_48h_sc_mouse_filtered_merged_seurat_cc.rds")
+```
+
+
